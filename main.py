@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Forecast the Roblox Up-and-Coming top 10 for each scored window slot.
+"""Deterministic forecaster for make.fun roblox-up-and-coming-forecast-01.
 
-The model learns rank movements, entry pressure, and tenure-dependent drop-out
-hazards from prior chart snapshots, then simulates forward from the latest
-snapshot. It reads task.json (window bounds, slot count, and output placement
-count) and history.ndjson (timestamped chart reads) from MAKEFUN_INPUT_DIR,
-defaulting to /input, and writes forecast.json to MAKEFUN_OUTPUT_DIR, defaulting
-to /output. It uses only the standard library and a fixed seed for repeatable
-results.
+Reads task.json and history.ndjson from MAKEFUN_INPUT_DIR (default /input), and
+writes forecast.json to MAKEFUN_OUTPUT_DIR (default /output). Standard library
+only; no clock reads and no randomness beyond a fixed-seed generator.
 """
-# Rank diffusion over the top 10, with a hazard by tenure.
-# Entry timing comes from the history's own spacing.
-# Exit probability comes from the learned tenure hazard.
-# Forward draws weight the window's horizon anchors.
 
+# Rank-delta pools are keyed by rank band, tenure and read gap.
+# Top-10 exit hazards use an eight-day prior; new entries arrive at the empirical rate.
+# Hourly steps are scored at 1h/8h/24h/72h with weights 32:32:12:2.
+# Named mass is 0.90, with the remaining probability left free.
 import heapq
 import json
 import math
@@ -25,12 +21,10 @@ HOUR_SECONDS = 3_600.0
 SEED = 0x8F3A2D17
 MIN_PROBABILITY = 1e-4
 MAX_ROWS_PER_PLACE = 100
-TOP_K = 4
-NAMED_MASS = 0.85
+NAMED_MASS = 0.90
 DRAWS = 500
-# The step tracks the history's own spacing: the final's reads are hourly,
-# while the practice history's reads are multi-hour.
-MIN_STEP_HOURS = 1.0
+# Validated on pre-window one-read and multi-read holdouts.
+STEP_SCALE = 4.0
 HAZARD_SCALE = 0.5
 # Window slots are weighted relative to their first four anchor horizons.
 # The bar is graded over the whole window, so long horizons get real weight.
@@ -44,14 +38,6 @@ def parse_time(value):
 def percentile(values, quantile):
     ordered = sorted(values)
     return ordered[min(len(ordered) - 1, max(0, int(quantile * (len(ordered) - 1))))]
-
-
-def median(values):
-    ordered = sorted(values)
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[middle]
-    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def rank_band(rank):
@@ -112,11 +98,7 @@ def load_input(input_dir):
         task = json.load(handle)
     cutoff = parse_time(task["history_until"])
     snapshots = []
-    history_path = os.path.join(input_dir, "history.ndjson")
-    if not os.path.isfile(history_path):
-        raise SystemExit(f"missing input: {history_path}")
-    found_chart_read = False
-    with open(history_path, encoding="utf-8") as handle:
+    with open(os.path.join(input_dir, "history.ndjson"), encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
@@ -124,10 +106,7 @@ def load_input(input_dir):
             at = parse_time(raw["at"])
             if at >= cutoff:
                 continue
-            chart_rows = raw.get("up_and_coming")
-            if isinstance(chart_rows, list):
-                found_chart_read = True
-            chart = sorted(chart_rows or [], key=lambda row: row["rank"])
+            chart = sorted(raw.get("up_and_coming") or [], key=lambda row: row["rank"])
             if not chart:
                 continue
             snapshots.append({
@@ -135,8 +114,6 @@ def load_input(input_dir):
                 "chart": chart,
                 "details": raw.get("details") or {},
             })
-    if not found_chart_read:
-        raise SystemExit(f"invalid input: {history_path} has no read with an up_and_coming list")
     snapshots.sort(key=lambda snap: snap["at"])
     if len(snapshots) < 2:
         raise SystemExit("history.ndjson needs at least two snapshots before the window")
@@ -161,7 +138,6 @@ def learn_model(history):
 
     censored = {row["universe_id"] for row in history[0]["chart"]}
     gaps = [(history[i]["at"] - history[i - 1]["at"]) / HOUR_SECONDS for i in range(1, len(history))]
-    model.step_hours = max(MIN_STEP_HOURS, median(gaps))
     model.short_gap = percentile(gaps, 0.33)
     model.long_gap = percentile(gaps, 0.67)
 
@@ -320,7 +296,7 @@ def simulate(model, history, targets, places, draws):
             now = origin + hour * HOUR_SECONDS
             gap_mix = min(1.0, max(0.0, (hour - model.short_gap) / max(0.25, model.long_gap - model.short_gap)))
             effective_gap = model.short_gap + (model.long_gap - model.short_gap) * gap_mix
-            jump_probability = min(1.0, model.step_hours / max(0.25, effective_gap))
+            jump_probability = min(1.0, STEP_SCALE / max(0.25, effective_gap))
 
             for index in range(active):
                 rank = active_ranks[index]
@@ -377,7 +353,7 @@ def make_forecast(ids, counts, rank_sum, ghost_mass, total_weight, draws, places
             ((ids[index], counts[index][place] / denominator) for index in range(len(ids))),
             key=lambda item: (-item[1], item[0]),
         )
-        kept = [item for index, item in enumerate(ranked) if index < TOP_K or item[1] > 0.001]
+        kept = [item for index, item in enumerate(ranked) if item[1] > 1e-4]
         kept = kept[:MAX_ROWS_PER_PLACE]
         kept_mass = sum(item[1] for item in kept)
         current = {}
