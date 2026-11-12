@@ -24,8 +24,9 @@ MAX_ROWS_PER_PLACE = 100
 TOP_K = 4
 NAMED_MASS = 0.85
 DRAWS = 500
-# Validated on pre-window one-read and multi-read holdouts.
-STEP_SCALE = 4.0
+# The step tracks the history's own spacing: the final's reads are hourly,
+# while the practice history's reads are multi-hour.
+MIN_STEP_HOURS = 1.0
 HAZARD_SCALE = 0.5
 # Window slots are weighted relative to their first four anchor horizons.
 # The bar is graded over the whole window, so long horizons get real weight.
@@ -39,6 +40,14 @@ def parse_time(value):
 def percentile(values, quantile):
     ordered = sorted(values)
     return ordered[min(len(ordered) - 1, max(0, int(quantile * (len(ordered) - 1))))]
+
+
+def median(values):
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def rank_band(rank):
@@ -148,6 +157,7 @@ def learn_model(history):
 
     censored = {row["universe_id"] for row in history[0]["chart"]}
     gaps = [(history[i]["at"] - history[i - 1]["at"]) / HOUR_SECONDS for i in range(1, len(history))]
+    model.step_hours = max(MIN_STEP_HOURS, median(gaps))
     model.short_gap = percentile(gaps, 0.33)
     model.long_gap = percentile(gaps, 0.67)
 
@@ -306,7 +316,7 @@ def simulate(model, history, targets, places, draws):
             now = origin + hour * HOUR_SECONDS
             gap_mix = min(1.0, max(0.0, (hour - model.short_gap) / max(0.25, model.long_gap - model.short_gap)))
             effective_gap = model.short_gap + (model.long_gap - model.short_gap) * gap_mix
-            jump_probability = min(1.0, STEP_SCALE / max(0.25, effective_gap))
+            jump_probability = min(1.0, model.step_hours / max(0.25, effective_gap))
 
             for index in range(active):
                 rank = active_ranks[index]
