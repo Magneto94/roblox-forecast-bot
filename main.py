@@ -9,6 +9,10 @@ defaulting to /input, and writes forecast.json to MAKEFUN_OUTPUT_DIR, defaulting
 to /output. It uses only the standard library and a fixed seed for repeatable
 results.
 """
+# Rank diffusion over the top 10, with a hazard by tenure.
+# Entry timing comes from the history's own spacing.
+# Exit probability comes from the learned tenure hazard.
+# Forward draws weight the window's horizon anchors.
 
 import heapq
 import json
