@@ -1,3 +1,7 @@
+# Rank-delta pools are keyed by rank band, tenure and read gap.
+# Top-10 exit hazards use an eight-day prior; new entries arrive at the empirical rate.
+# Hourly steps are scored at 1h/8h/24h/72h with weights 32:32:12:2.
+# Named mass is 0.90, with the remaining probability left free.
 #!/usr/bin/env python3
 """Deterministic forecaster for make.fun roblox-up-and-coming-forecast-01.
 
